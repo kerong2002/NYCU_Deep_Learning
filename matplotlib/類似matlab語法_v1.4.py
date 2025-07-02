@@ -54,6 +54,14 @@ fig.suptitle("股票分析圖")
 fig.supylabel("股價")
 fig.supxlabel("季度")
 
+# 改變顏色
+axes[1, 0].set_facecolor('grey')
+axes[1, 0].patch.set_alpha(0.2)
+axes[0, 0].set_facecolor('red')
+axes[0, 0].patch.set_alpha(0.2)
+# 緊湊一點
+plt.tight_layout()
+
 
 # 顯示繪製完成的所有圖形
 plt.show()
