@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
+from torchvision import datasets, transforms
 
 # Define the neural network model
 class Net(nn.Module):
@@ -13,9 +14,11 @@ class Net(nn.Module):
         self.activation = activation
 
     def forward(self, x):
+        x = x.view(x.size(0), -1)  # 展平成 [batch_size, 784]
         x = torch.relu(self.fc1(x)) if self.activation == 'relu' else torch.sigmoid(self.fc1(x))
         x = self.fc2(x)
         return x
+
 
 # Define the training loop
 def train(model, device, train_loader, optimizer, epoch):
@@ -75,6 +78,10 @@ def main():
                         help='optimizer to use (default: sgd)')
     parser.add_argument('--activation', type=str, default='relu',
                         help='activation function to use (default: relu)')
+    parser.add_argument('--test-only', action='store_true', default=False,
+                        help='only run test')
+    parser.add_argument('--model-path', type=str, default='mnist_cnn.pt',
+                        help='path to saved model for testing')
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
 
@@ -83,35 +90,49 @@ def main():
     device = torch.device("cuda" if use_cuda else "cpu")
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
-    train_loader = torch.utils.data.DataLoader(
-        data.MNIST('./data', train=True, download=True,
-                       transform=data.transforms.Compose([
-                           data.transforms.ToTensor(),
-                           data.transforms.Normalize((0.1307,), (0.3081,))
-                       ])),
-        batch_size=args.batch_size, shuffle=True, **kwargs)
-    test_loader = torch.utils.data.DataLoader(
-        data.MNIST('./data', train=False, transform=data.transforms.Compose([
-                           data.transforms.ToTensor(),
-                           data.transforms.Normalize((0.1307,), (0.3081,))
+    
+    test_loader = data.DataLoader(
+        datasets.MNIST('./data', train=False, download=True,
+                       transform=transforms.Compose([
+                           transforms.ToTensor(),
+                           transforms.Normalize((0.1307,), (0.3081,))
                        ])),
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
 
-
     model = Net(args.activation).to(device)
-    if args.optimizer == 'sgd':
-        optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-    elif args.optimizer == 'adam':
-        optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    else:
-        raise ValueError('Invalid optimizer choice')
 
-    for epoch in range(1, args.epochs + 1):
-        train(model, device, train_loader, optimizer, epoch)
+    if args.test_only:
+        try:
+            model.load_state_dict(torch.load(args.model_path, map_location=device))
+            print(f"Model loaded from {args.model_path}")
+        except FileNotFoundError:
+            print(f"Error: Model file not found at {args.model_path}")
+            print("Please train the model first using --save-model")
+            return
         test(model, device, test_loader)
+    else:
+        train_loader = data.DataLoader(
+            datasets.MNIST('./data', train=True, download=True,
+                           transform=transforms.Compose([
+                               transforms.ToTensor(),
+                               transforms.Normalize((0.1307,), (0.3081,))
+                           ])),
+            batch_size=args.batch_size, shuffle=True, **kwargs)
+        
+        if args.optimizer == 'sgd':
+            optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+        elif args.optimizer == 'adam':
+            optimizer = optim.Adam(model.parameters(), lr=args.lr)
+        else:
+            raise ValueError('Invalid optimizer choice')
 
-    if args.save_model:
-        torch.save(model.state_dict(), "mnist_cnn.pt")
+        for epoch in range(1, args.epochs + 1):
+            train(model, device, train_loader, optimizer, epoch)
+            test(model, device, test_loader)
+
+        if args.save_model:
+            torch.save(model.state_dict(), args.model_path)
+            print(f"Model saved to {args.model_path}")
 
 if __name__ == '__main__':
     main()
