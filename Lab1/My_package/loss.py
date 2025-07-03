@@ -5,12 +5,9 @@ Author: CHEN, KE-RONG
 Date: 2025/07/02
 '''
 
-'''
-Loss function
-Mean Squared Error(mse)
-CrossEntropyLoss(cross)
-BCELoss(bce)
-'''
+
+# Loss function： Mean Squared Error(mse), CrossEntropyLoss(cross), BCELoss(bce)
+
 import numpy as np
 
 class Loss:

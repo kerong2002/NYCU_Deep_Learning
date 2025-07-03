@@ -46,9 +46,9 @@ python Lab1/main.py --help
 | `--activation`  | `sigmoid`          | `sigmoid`, `relu`     | 選擇隱藏層的活化函數。         ||
 | `--optimizer`   | `sgd`              | `sgd`, `gd`, `adam`, `adagrad` | 選擇優化器（目前僅支援 SGD）。 |✅️|
 | `--loss`        | `bce`              | `bce`, `mse`, `cross` | 選擇損失函數（建議分類問題用 bce）。|✅️|
-| `--momentum`    | `0.0`              | 0.0~1.0               | 設定 SGD 優化器的動量值。      |
-| `--seed`        | `1`                | 任意正整數                 | 設定隨機數種子，確保實驗可重複。|
-| `--log-interval`| `1000`             | 任意正整數                 | 每隔多少週期輸出一次訓練日誌。  |
+| `--momentum`    | `0.0`              | 0.0~1.0               | 設定 SGD 優化器的動量值。      |✅️|
+| `--seed`        | `1`                | 任意正整數                 | 設定隨機數種子，確保實驗可重複。|✅️|
+| `--log-interval`| `1000`             | 任意正整數                 | 每隔多少週期輸出一次訓練日誌。  |✅️|
 ### 執行範例
 
 1.  **使用預設參數執行 (XOR 資料集, Sigmoid, 20000 epochs):**

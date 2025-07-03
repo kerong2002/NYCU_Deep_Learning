@@ -50,17 +50,21 @@ def main():
 
     # --- 資料準備 ---
     print(f"使用資料集: {args.dataset.upper()}")
+
     if args.dataset == 'linear':
         X, y = generate_linear(n=100)
     else:
         X, y = generate_XOR_easy()
+
     plot_data(X, y, title=f"Original {args.dataset.upper()} Data")
 
     # --- 模型建構 ---
     print("\n開始建構循序模型...")
+
     activation_layer = {'sigmoid': Sigmoid, 'relu': ReLU}[args.activation]
     
     layers = []
+    # 輸入資料維度，linear/XOR 資料都是 2 維
     input_dim = 2
     for hidden_dim in args.hidden_dims:
         layers.append(Linear(input_dim, hidden_dim))

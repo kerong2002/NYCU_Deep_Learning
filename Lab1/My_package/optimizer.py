@@ -5,13 +5,9 @@ Author: CHEN, KE-RONG
 Date: 2025/07/02
 '''
 
-'''
-Optimizer:
-GD
-SGD
-Adam
-Adagrad
-'''
+
+# Optimizer: GD, SGD, Adam, Adagrad
+
 
 import numpy as np
 
