@@ -4,23 +4,16 @@ Topic: back-propagation
 Author: CHEN, KE-RONG
 Date: 2025/07/02
 '''
-import sys
-import os
 import argparse
 import numpy as np
 
-# 將 Lab1 的父目錄加入 sys.path
-current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.append(parent_dir)
-
-from Lab1.dataset import generate_linear, generate_XOR_easy, plot_data
-from Lab1.My_package.model import Sequential
-from Lab1.My_package.layers import Linear, Sigmoid, ReLU
-from Lab1.My_package.loss import MSE, BCELoss
-from Lab1.My_package.optimizer import SGD
-from Lab1.My_package.trainer import Trainer
-from Lab1.show_result import show_result, plot_loss_curve
+from dataset import generate_linear, generate_XOR_easy, plot_data
+from My_package.model import Sequential
+from My_package.layers import Linear, Sigmoid, ReLU
+from My_package.loss import MSE, BCELoss, CrossEntropyLoss
+from My_package.optimizer import SGD
+from My_package.trainer import Trainer
+from show_result import show_result, plot_loss_curve
 
 def main():
     """
@@ -40,7 +33,7 @@ def main():
                         help='activation function to use (default: sigmoid)')
     parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd'],
                         help='optimizer to use (default: sgd)')
-    parser.add_argument('--loss', type=str, default='bce', choices=['mse', 'bce'],
+    parser.add_argument('--loss', type=str, default='bce', choices=['mse', 'bce', 'cross'],
                         help='loss function to use (default: bce)')
     parser.add_argument('--momentum', type=float, default=0.0, metavar='M',
                         help='SGD momentum (default: 0.0)')
@@ -78,8 +71,10 @@ def main():
     for layer in model.layers:
         print(f"- {layer.__class__.__name__}")
 
+
     # --- 訓練設定 ---
-    loss_fn = {'mse': MSE, 'bce': BCELoss}[args.loss]()
+    loss_fn = {'mse': MSE, 'bce': BCELoss, 'cross': CrossEntropyLoss}[args.loss]()
+
     if args.optimizer == 'sgd':
         optimizer = SGD(learning_rate=args.lr, momentum=args.momentum)
     else:

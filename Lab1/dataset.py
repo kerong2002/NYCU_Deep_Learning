@@ -1,9 +1,4 @@
-'''
-Name: DLP Lab1
-Topic: back-propagation
-Author: CHEN, KE-RONG
-Date: 2025/07/02
-'''
+                                 
 
 import numpy as np
 import matplotlib.pyplot as plt
