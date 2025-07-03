@@ -4,6 +4,8 @@ Topic: back-propagation
 Author: CHEN, KE-RONG
 Date: 2025/07/02
 '''
+
+# 進度條函式庫
 from tqdm import tqdm
 
 class Trainer:

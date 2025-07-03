@@ -8,11 +8,14 @@ import argparse
 import numpy as np
 
 from dataset import generate_linear, generate_XOR_easy, plot_data
+
+from My_package.loss import MSE, BCELoss, CrossEntropyLoss
+from My_package.optimizer import SGD, GD, Adam, Adagrad
+
 from My_package.model import Sequential
 from My_package.layers import Linear, Sigmoid, ReLU
-from My_package.loss import MSE, BCELoss, CrossEntropyLoss
-from My_package.optimizer import SGD
 from My_package.trainer import Trainer
+
 from show_result import show_result, plot_loss_curve
 
 def main():
@@ -31,7 +34,7 @@ def main():
                         help='dimensions of hidden layers (default: 10 10)')
     parser.add_argument('--activation', type=str, default='sigmoid', choices=['sigmoid', 'relu'],
                         help='activation function to use (default: sigmoid)')
-    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd'],
+    parser.add_argument('--optimizer', type=str, default='sgd', choices=['sgd', 'gd', 'adam', 'adagrad'],
                         help='optimizer to use (default: sgd)')
     parser.add_argument('--loss', type=str, default='bce', choices=['mse', 'bce', 'cross'],
                         help='loss function to use (default: bce)')
@@ -75,11 +78,23 @@ def main():
     # --- 訓練設定 ---
     loss_fn = {'mse': MSE, 'bce': BCELoss, 'cross': CrossEntropyLoss}[args.loss]()
 
-    if args.optimizer == 'sgd':
-        optimizer = SGD(learning_rate=args.lr, momentum=args.momentum)
-    else:
-        # 未來可以擴充其他優化器
+    # if args.optimizer == 'sgd':
+    #     optimizer = SGD(learning_rate=args.lr, momentum=args.momentum)
+    # else:
+    #     # 未來可以擴充其他優化器
+    #     raise ValueError(f"不支援的優化器: {args.optimizer}")
+
+    optimizer = {
+        'sgd': lambda: SGD(learning_rate=args.lr, momentum=args.momentum),
+        'gd': lambda: GD(learning_rate=args.lr),
+        'adam': lambda: Adam(learning_rate=args.lr),
+        'adagrad': lambda: Adagrad(learning_rate=args.lr)
+    }.get(args.optimizer)
+
+    if optimizer is None:
         raise ValueError(f"不支援的優化器: {args.optimizer}")
+
+    optimizer = optimizer()
 
     trainer = Trainer(model, loss_fn, optimizer)
 
