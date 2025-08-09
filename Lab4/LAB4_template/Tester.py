@@ -133,28 +133,34 @@ class Test_model(VAE_Model):
         label_list = []
 
         # TODO
-        for t in range(1, label.shape[0]):
-            prev = decoded_frame_list[-1].to(self.args.device) # 取得前一個生成
-            lbl = label[t, ...].to(self.args.device) # 取得目前的標籤
+        for i in range(1, label.shape[0]):
+            # 取得前一個生成的影格
+            previous_frame = decoded_frame_list[-1].to(self.args.device)
+            # 取得目前的標籤
+            current_label = label[i, ...].to(self.args.device)
 
-            encoded_img = self.frame_transformation(prev)
-            encoded_label = self.label_transformation(lbl)
+            # 將前一影格與當前標籤轉換為特徵向量
+            encoded_previous_frame = self.frame_transformation(previous_frame)
+            encoded_current_label = self.label_transformation(current_label)
 
             # 產生潛在空間的分佈（均值和對數方差）
-            z, mu, logvar = self.Gaussian_Predictor(encoded_img, encoded_label)
+            latent_z, mu, logvar = self.Gaussian_Predictor(encoded_previous_frame, encoded_current_label)
             # 從標準正態分佈中採樣噪聲，用於生成過程
-            eps = torch.randn_like(z)
+            noise = torch.randn_like(latent_z)
 
             # 解碼器融合模組，結合前一影格特徵、標籤特徵和噪聲來生成解碼後的特徵
-            decoded_frame = self.Decoder_Fusion(encoded_img, encoded_label, eps)
+            fused_features = self.Decoder_Fusion(encoded_previous_frame, encoded_current_label, noise)
 
-            x_hat = self.Generator(decoded_frame)
-            x_hat = nn.functional.sigmoid(x_hat) # 縮放到 [0, 1] 範圍
+            # 生成器根據融合後的特徵生成新的影格
+            generated_frame = self.Generator(fused_features)
+            generated_frame = nn.functional.sigmoid(generated_frame)  # 將數值縮放到 [0, 1] 範圍
+            # generated_frame = nn.functional.Tanh(generated_frame)
 
-            decoded_frame_list.append(x_hat.cpu())
-            label_list.append(lbl.cpu())
-            
-            
+            # 將生成的影格和標籤儲存起來
+            decoded_frame_list.append(generated_frame.cpu())
+            label_list.append(current_label.cpu())
+
+
         # Please do not modify this part, it is used for visulization
         generated_frame = stack(decoded_frame_list).permute(1, 0, 2, 3, 4)
         label_frame = stack(label_list).permute(1, 0, 2, 3, 4)
@@ -191,7 +197,8 @@ class Test_model(VAE_Model):
 
     def load_checkpoint(self):
         if self.args.ckpt_path != None:
-            checkpoint = torch.load(self.args.ckpt_path)
+            # checkpoint = torch.load(self.args.ckpt_path)
+            checkpoint = torch.load(self.args.ckpt_path, map_location=self.args.device)
             self.load_state_dict(checkpoint["state_dict"], strict=True)
 
 

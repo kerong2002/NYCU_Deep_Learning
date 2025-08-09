@@ -80,11 +80,11 @@ class Gaussian_Predictor(nn.Sequential):
 
     def reparameterize(self, mu, logvar):
         # TODO
-        # 重參數化技巧
-        # std = torch.exp(logvar / 2) # 計算標準差
 
-        eps = torch.randn_like(logvar) # 從標準常態中採樣噪聲
-        return mu + torch.exp(logvar / 2) * eps # 平均 + 標準差 × 標準常態噪聲
+        # 重參數化技巧
+        std = torch.exp(0.5 * logvar) # 計算標準差
+        eps = torch.randn_like(std) # 從標準常態中採樣噪聲
+        return eps.mul(std).add_(mu) # 平均 + 標準差 × 標準常態噪聲
 
     def forward(self, img, label):
         feature = torch.cat([img, label], dim=1)

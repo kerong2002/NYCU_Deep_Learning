@@ -123,13 +123,19 @@ class VAE_Model(nn.Module):
         for i in range(1, self.args.num_epoch + 1):
             train_loader = self.train_dataloader()
             adapt_TeacherForcing = True if random.random() < self.tfr else False
+            
             total_loss = 0
+            total_recon_loss = 0
+            total_kl_loss = 0
 
             for img, label in (pbar := tqdm(train_loader, ncols=120)):
                 img = img.to(self.args.device)
                 label = label.to(self.args.device)
-                loss = self.training_one_step(img, label, adapt_TeacherForcing)
+                loss, recon_loss, kl_loss = self.training_one_step(img, label, adapt_TeacherForcing)
+                
                 total_loss += loss.detach().cpu()
+                total_recon_loss += recon_loss.detach().cpu()
+                total_kl_loss += kl_loss.detach().cpu()
 
                 beta = self.kl_annealing.get_beta()
                 if adapt_TeacherForcing:
@@ -143,12 +149,19 @@ class VAE_Model(nn.Module):
             if i % self.args.per_save == 0:
                 self.save(os.path.join(self.args.save_root, f"epoch_{i}.ckpt"))
 
+            # Log training metrics to wandb
             if self.args.wandb:
+                avg_loss = total_loss / len(train_loader)
+                avg_recon_loss = total_recon_loss / len(train_loader)
+                avg_kl_loss = total_kl_loss / len(train_loader)
                 wandb.log({
-                    "train/loss": total_loss / len(train_loader),
-                    "train/lr": self.scheduler.get_last_lr()[0],
-                    "train/tfr": self.tfr,
+                    "train/total_loss": avg_loss,
+                    "train/reconstruction_loss": avg_recon_loss,
+                    "train/kl_divergence": avg_kl_loss,
+                    "train/elbo": avg_recon_loss + avg_kl_loss,
                     "train/beta": beta,
+                    "train/tfr": self.tfr,
+                    "train/lr": self.scheduler.get_last_lr()[0],
                 }, step=self.current_epoch)
 
             self.eval()
@@ -162,27 +175,42 @@ class VAE_Model(nn.Module):
         val_loader = self.val_dataloader()
         total_loss = 0
         total_psnr = 0
+        total_recon_loss = 0
+        total_kl_loss = 0
+        
         for img, label in (pbar := tqdm(val_loader, ncols=120)):
             img = img.to(self.args.device)
             label = label.to(self.args.device)
-            loss, psnr = self.val_one_step(img, label)
+            loss, recon_loss, kl_loss, psnr = self.val_one_step(img, label)
             self.tqdm_bar(
                 "val", pbar, loss.detach().cpu(), lr=self.scheduler.get_last_lr()[0]
             )
             
             total_loss += loss.detach().cpu()
+            total_recon_loss += recon_loss.detach().cpu()
+            total_kl_loss += kl_loss.detach().cpu()
             total_psnr += psnr.detach().cpu()
 
+        # Log validation metrics to wandb
         if self.args.wandb:
+            avg_loss = total_loss / len(val_loader)
+            avg_recon_loss = total_recon_loss / len(val_loader)
+            avg_kl_loss = total_kl_loss / len(val_loader)
+            avg_psnr = total_psnr / len(val_loader)
             wandb.log({
-                "val/loss": total_loss / len(val_loader),
+                "val/total_loss": avg_loss,
+                "val/reconstruction_loss": avg_recon_loss,
+                "val/kl_divergence": avg_kl_loss,
+                "val/elbo": avg_recon_loss + avg_kl_loss,
+                "val/psnr": avg_psnr,
                 "val/lr": self.scheduler.get_last_lr()[0],
                 "val/tfr": self.tfr,
-                "val/psnr": total_psnr / len(val_loader),
             }, step=self.current_epoch)
 
     def training_one_step(self, image_sequence, label_sequence, use_teacher_forcing):
         total_training_loss = 0
+        total_recon_loss = 0
+        total_kl_loss = 0
         kl_beta_weight = self.kl_annealing.get_beta()
 
         batch_size, timesteps = image_sequence.shape[:2]
@@ -220,20 +248,26 @@ class VAE_Model(nn.Module):
             # 結合兩種損失，並使用 beta 加權 KL 損失
             step_loss = reconstruction_loss + kl_beta_weight * kl_divergence_loss
             total_training_loss += step_loss
+            total_recon_loss += reconstruction_loss
+            total_kl_loss += kl_divergence_loss
 
         # 正規化總損失
-        total_training_loss /= batch_size
+        total_training_loss /= (timesteps - 1)
+        total_recon_loss /= (timesteps - 1)
+        total_kl_loss /= (timesteps - 1)
 
         # 梯度清零、反向傳播和更新模型參數
         self.optim.zero_grad()
         total_training_loss.backward()
         self.optimizer_step()
 
-        return total_training_loss
+        return total_training_loss, total_recon_loss, total_kl_loss
 
     @torch.no_grad()
     def val_one_step(self, image_sequence, label_sequence):
         total_validation_loss = 0
+        total_recon_loss = 0
+        total_kl_loss = 0
         total_validation_psnr = 0
         batch_size, timesteps = image_sequence.shape[:2]
         # 將 predicted_frame 初始化為影片的第一個影格
@@ -268,14 +302,19 @@ class VAE_Model(nn.Module):
             # 結合損失
             step_loss = reconstruction_loss + kl_beta_weight * kl_divergence_loss
             total_validation_loss += step_loss
+            total_recon_loss += reconstruction_loss
+            total_kl_loss += kl_divergence_loss
+            
             # 計算並累加 PSNR
             total_validation_psnr += Generate_PSNR(predicted_frame, current_ground_truth_frame)
 
         # 正規化總損失和總 PSNR
-        total_validation_loss /= batch_size
-        total_validation_psnr /= batch_size * timesteps
+        total_validation_loss /= (timesteps - 1)
+        total_recon_loss /= (timesteps - 1)
+        total_kl_loss /= (timesteps - 1)
+        total_validation_psnr /= (timesteps - 1)
 
-        return total_validation_loss, total_validation_psnr
+        return total_validation_loss, total_recon_loss, total_kl_loss, total_validation_psnr
 
     def make_gif(self, images_list, img_name):
         new_list = []
@@ -349,7 +388,11 @@ class VAE_Model(nn.Module):
 
 def main(args):
     if args.wandb:
-        wandb.init(project="Lab4_VAE", name=f"VAE_tfr_{args.tfr}_kl-type_{args.kl_anneal_type}_kl-cycle_{args.kl_anneal_cycle}_kl-ratio_{args.kl_anneal_ratio}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}", config=vars(args))
+        wandb.init(project="Lab4_VAE", name=f"VAE_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}", config=vars(args),
+        id = args.wandb_id,  # <== 加這行
+        resume = "must"  # <== 加這行，強制恢復
+
+        )
 
     os.makedirs(args.save_root, exist_ok=True)
     model = VAE_Model(args).to(args.device)
@@ -363,6 +406,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("--wandb", action="store_true", help="Enable wandb logging")
+    parser.add_argument('--wandb_id', type=str, default=None, help="WandB run id for resuming")
     parser.add_argument("--batch_size", type=int, default=2)
     parser.add_argument("--lr", type=float, default=0.0001, help="initial learning rate")
     parser.add_argument('--device', type=str, choices=["cuda", "cpu"], default="cuda")
