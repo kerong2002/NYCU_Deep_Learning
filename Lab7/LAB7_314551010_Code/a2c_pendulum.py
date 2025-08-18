@@ -140,19 +140,26 @@ class A2CLearner:
         dones_t = to_tensor(np.array(dones), device).view(-1, 1)
 
         with torch.no_grad():
+            # 計算TD目標
             td_target = rewards_t + self.config.gamma * self.critic(next_states_t) * (1 - dones_t)
 
+        # 取得當前狀態估計
         state_values = self.critic(states_t)
         critic_loss = F.smooth_l1_loss(state_values, td_target)
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.max_grad_norm)
         self.critic_optimizer.step()
-
+        
+        # TD 誤差
         advantage = (td_target - state_values).detach()
         policy_dist = self.actor(states_t)
+        
+        # 取得採樣動作的對數機率 log(π(a|s))
         log_probs = policy_dist.log_prob(actions_t)
         entropy = policy_dist.entropy().mean()
+        
+        # 3. 計算 Actor Loss (包含策略梯度和熵獎勵)
         actor_loss = -(log_probs * advantage).mean() - self.config.entropy_beta * entropy
         self.actor_optimizer.zero_grad()
         actor_loss.backward()

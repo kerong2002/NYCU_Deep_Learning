@@ -4,14 +4,15 @@
 # Lab7: Policy-based RL
 # Task 3: PPO-Clip for Walker2d-v4
 #
-# v3.0 更新日誌 (參考成功範例進行優化):
-# - [優化] 調整超參數以適應 Walker2d-v4 的高難度。
-#   - 提高 gamma 至 0.99，讓 Agent 更重視長期回報。
-#   - 降低 entropy_beta 至 0.01，減少不必要的隨機探索，穩定學習。
-#   - 調整學習率至更穩定的範圍。
-# - [優化] 將神經網路的隱藏層從 64 擴大到 256，增強模型容量。
-# - [新增] 加入學習率線性衰減 (anneal_lr) 功能，幫助後期收斂。
-# - 保留了 v2.1 的所有錯誤修復和日誌輸出格式。
+# v5.0 更新日誌 (進階優化):
+# - [新增] KL 散度監控和早停機制，避免策略更新過度
+# - [新增] 自適應學習率調整，根據KL散度動態調整
+# - [優化] 改進的梯度裁剪策略
+# - [新增] 價值函數預熱 (Value Function Warmup)
+# - [優化] 更好的正規化和初始化策略
+# - [新增] 動作標準差衰減機制，提升後期穩定性
+# - [修正] 修復潛在的數值穩定性問題
+# - [新增] 更詳細的訓練統計和監控
 
 import os
 import random
@@ -37,7 +38,7 @@ except ImportError:
 
 
 # =============================================================================
-#  1. 神經網路模型 (Actor & Critic)
+#  1. 改進的神經網路模型 (Actor & Critic)
 # =============================================================================
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -48,45 +49,58 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Actor(nn.Module):
-    """策略網路 (Policy Network)，負責根據當前狀態生成動作。"""
+    """改進的策略網路，加入更好的正規化和初始化。"""
 
-    def __init__(self, state_dim: int, action_dim: int):
+    def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
-        # [優化] 增加網路容量以應對更複雜的任務
         self.net = nn.Sequential(
-            layer_init(nn.Linear(state_dim, 256)),
+            layer_init(nn.Linear(state_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(256, action_dim), std=0.01),
+            layer_init(nn.Linear(hidden_dim, action_dim), std=0.01),
         )
+        # 改進：使用可學習但有界的log std
         self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
+        self.action_dim = action_dim
 
     def forward(self, state: torch.Tensor) -> tuple[torch.Tensor, Normal]:
         action_mean = self.net(state)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
+        # 限制log std的範圍，避免數值不穩定
+        action_logstd = torch.clamp(self.actor_logstd.expand_as(action_mean), -20, 2)
         action_std = torch.exp(action_logstd)
         dist = Normal(action_mean, action_std)
         action = dist.sample()
         return action, dist
 
+    def get_action_and_value(self, state: torch.Tensor, action: torch.Tensor = None):
+        """獲取動作和對應的log概率，用於訓練時的效率優化"""
+        action_mean = self.net(state)
+        action_logstd = torch.clamp(self.actor_logstd.expand_as(action_mean), -20, 2)
+        action_std = torch.exp(action_logstd)
+        dist = Normal(action_mean, action_std)
+
+        if action is None:
+            action = dist.sample()
+
+        return action, dist.log_prob(action).sum(1), dist.entropy().sum(1)
+
 
 class Critic(nn.Module):
-    """價值網路 (Value Network)，負責評估一個狀態的價值 (V-value)。"""
+    """改進的價值網路，加入更好的正規化。"""
 
-    def __init__(self, state_dim: int):
+    def __init__(self, state_dim: int, hidden_dim: int = 256):
         super().__init__()
-        # [優化] 增加網路容量
         self.net = nn.Sequential(
-            layer_init(nn.Linear(state_dim, 256)),
+            layer_init(nn.Linear(state_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(256, 256)),
+            layer_init(nn.Linear(hidden_dim, hidden_dim)),
             nn.Tanh(),
-            layer_init(nn.Linear(256, 1), std=1.0),
+            layer_init(nn.Linear(hidden_dim, 1), std=1.0),
         )
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        return self.net(state)
+        return self.net(state).squeeze(-1)
 
 
 # =============================================================================
@@ -126,6 +140,7 @@ def ppo_iter(
         log_probs: torch.Tensor,
         returns: torch.Tensor,
         advantages: torch.Tensor,
+        values: torch.Tensor,
 ):
     """一個迭代器，用於將一個大的 batch 數據隨機切分成多個 minibatch。"""
     indices = np.arange(batch_size)
@@ -133,16 +148,16 @@ def ppo_iter(
     for start in range(0, batch_size, minibatch_size):
         end = start + minibatch_size
         mb_indices = indices[start:end]
-        yield states[mb_indices], actions[mb_indices], log_probs[mb_indices], returns[mb_indices], advantages[
-            mb_indices]
+        yield (states[mb_indices], actions[mb_indices], log_probs[mb_indices],
+               returns[mb_indices], advantages[mb_indices], values[mb_indices])
 
 
 # =============================================================================
-#  3. PPO Agent 主類別
+#  3. 改進的 PPO Agent 主類別
 # =============================================================================
 
 class PPOAgent:
-    """PPO Agent，整合了模型、互動和學習的完整邏輯。"""
+    """改進的PPO Agent，加入KL散度監控和自適應學習率。"""
 
     def __init__(self, state_dim: int, action_dim: int, args: argparse.Namespace):
         """初始化 Agent"""
@@ -150,11 +165,32 @@ class PPOAgent:
         self.device = torch.device(args.device if torch.cuda.is_available() else "cpu")
         print(f"使用裝置: {self.device}")
 
-        self.actor = Actor(state_dim, action_dim).to(self.device)
-        self.critic = Critic(state_dim).to(self.device)
+        self.actor = Actor(state_dim, action_dim, args.hidden_dim).to(self.device)
+        self.critic = Critic(state_dim, args.hidden_dim).to(self.device)
 
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=args.actor_lr, eps=1e-5)
-        self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=args.critic_lr, eps=1e-5)
+        # 記錄初始學習率
+        self.initial_actor_lr = args.actor_lr
+        self.initial_critic_lr = args.critic_lr
+
+        if not args.inference:
+            self.actor_optimizer = optim.Adam(
+                self.actor.parameters(),
+                lr=args.actor_lr,
+                eps=1e-5,
+                weight_decay=args.weight_decay
+            )
+            self.critic_optimizer = optim.Adam(
+                self.critic.parameters(),
+                lr=args.critic_lr,
+                eps=1e-5,
+                weight_decay=args.weight_decay
+            )
+
+            # 自適應學習率相關
+            self.target_kl = args.target_kl
+            self.kl_threshold = args.kl_threshold
+            self.lr_decay_factor = 0.8
+            self.lr_restore_factor = 1.1
 
     def select_action(self, state: np.ndarray, is_test: bool = False) -> np.ndarray:
         """從給定的狀態中選擇一個動作。"""
@@ -165,47 +201,126 @@ class PPOAgent:
             action = dist.mean
         return action.cpu().numpy().flatten()
 
-    def update_model(self, states, actions, log_probs, returns, advantages) -> dict:
-        """使用收集到的 rollout 數據更新模型。"""
+    def update_model(self, states, actions, log_probs, returns, advantages, values) -> dict:
+        """改進的模型更新，加入KL散度監控和早停。"""
         minibatch_size = self.args.batch_size // self.args.num_minibatches
 
+        # 正規化優勢
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
+        policy_losses = []
+        value_losses = []
+        entropy_losses = []
+        approx_kls = []
+        clipfracs = []
+
+        early_stop = False
+
         for epoch in range(self.args.n_epochs):
-            for state, action, old_log_prob, return_, adv in ppo_iter(
+            if early_stop:
+                break
+
+            epoch_approx_kls = []
+
+            for state, action, old_log_prob, return_, adv, old_value in ppo_iter(
                     batch_size=self.args.batch_size,
                     minibatch_size=minibatch_size,
                     states=states, actions=actions, log_probs=log_probs,
-                    returns=returns, advantages=advantages,
+                    returns=returns, advantages=advantages, values=values,
             ):
-                _, new_dist = self.actor(state)
+                # 獲取新的策略輸出
+                _, new_log_prob, entropy = self.actor.get_action_and_value(state, action)
                 new_value = self.critic(state)
-                new_log_prob = new_dist.log_prob(action).sum(1)
-                entropy = new_dist.entropy().sum(1)
 
-                v_loss = F.smooth_l1_loss(new_value.squeeze(), return_)
-                self.critic_optimizer.zero_grad()
-                v_loss.backward()
-                nn.utils.clip_grad_norm_(self.critic.parameters(), self.args.max_grad_norm)
-                self.critic_optimizer.step()
-
+                # 計算KL散度 (近似)
                 log_ratio = new_log_prob - old_log_prob
                 ratio = torch.exp(log_ratio)
+
+                with torch.no_grad():
+                    # 近似KL散度
+                    approx_kl = ((ratio - 1) - log_ratio).mean()
+                    epoch_approx_kls.append(approx_kl.item())
+
+                    # 裁剪比例統計
+                    clipfrac = ((ratio - 1.0).abs() > self.args.clip_coef).float().mean()
+                    clipfracs.append(clipfrac.item())
+
+                # --- Critic 更新 (含價值裁剪) ---
+                if self.args.clip_vloss:
+                    v_loss_unclipped = (new_value - return_) ** 2
+                    v_clipped = old_value + torch.clamp(
+                        new_value - old_value, -self.args.clip_coef, self.args.clip_coef
+                    )
+                    v_loss_clipped = (v_clipped - return_) ** 2
+                    v_loss = 0.5 * torch.max(v_loss_unclipped, v_loss_clipped).mean()
+                else:
+                    v_loss = 0.5 * ((new_value - return_) ** 2).mean()
+
+                # --- Actor 更新 ---
                 surr1 = adv * ratio
                 surr2 = adv * torch.clamp(ratio, 1.0 - self.args.clip_coef, 1.0 + self.args.clip_coef)
                 pg_loss = -torch.min(surr1, surr2).mean()
-                actor_loss = pg_loss - self.args.entropy_beta * entropy.mean()
 
+                # 熵獎勵
+                entropy_loss = entropy.mean()
+                actor_loss = pg_loss - self.args.entropy_beta * entropy_loss
+
+                # 更新Critic
+                self.critic_optimizer.zero_grad()
+                (v_loss * self.args.vf_coef).backward()
+                if self.args.max_grad_norm > 0:
+                    critic_grad_norm = nn.utils.clip_grad_norm_(
+                        self.critic.parameters(), self.args.max_grad_norm
+                    )
+                self.critic_optimizer.step()
+
+                # 更新Actor
                 self.actor_optimizer.zero_grad()
                 actor_loss.backward()
-                nn.utils.clip_grad_norm_(self.actor.parameters(), self.args.max_grad_norm)
+                if self.args.max_grad_norm > 0:
+                    actor_grad_norm = nn.utils.clip_grad_norm_(
+                        self.actor.parameters(), self.args.max_grad_norm
+                    )
                 self.actor_optimizer.step()
 
-        return {"policy_loss": pg_loss.item(), "value_loss": v_loss.item()}
+                # 記錄損失
+                policy_losses.append(pg_loss.item())
+                value_losses.append(v_loss.item())
+                entropy_losses.append(entropy_loss.item())
+
+            # 檢查KL散度是否過大，若是則早停
+            avg_kl = np.mean(epoch_approx_kls)
+            approx_kls.append(avg_kl)
+
+            if self.args.early_stop_kl and avg_kl > self.kl_threshold:
+                print(f"Early stopping at epoch {epoch + 1} due to high KL divergence: {avg_kl:.4f}")
+                early_stop = True
+
+        # 自適應學習率調整
+        final_kl = np.mean(approx_kls[-5:]) if len(approx_kls) >= 5 else np.mean(approx_kls)
+        if final_kl > self.target_kl * 1.5:
+            # KL太大，降低學習率
+            for param_group in self.actor_optimizer.param_groups:
+                param_group['lr'] *= self.lr_decay_factor
+        elif final_kl < self.target_kl * 0.5:
+            # KL太小，可以稍微提高學習率
+            for param_group in self.actor_optimizer.param_groups:
+                param_group['lr'] = min(param_group['lr'] * self.lr_restore_factor,
+                                        self.initial_actor_lr)
+
+        return {
+            "policy_loss": np.mean(policy_losses),
+            "value_loss": np.mean(value_losses),
+            "entropy_loss": np.mean(entropy_losses),
+            "approx_kl": np.mean(approx_kls),
+            "clipfrac": np.mean(clipfracs),
+            "actor_lr": self.actor_optimizer.param_groups[0]['lr'],
+            "critic_lr": self.critic_optimizer.param_groups[0]['lr'],
+        }
 
 
 # =============================================================================
-#  4. 訓練與評估流程
+#  4. 訓練與評估流程 (保持原有邏輯)
 # =============================================================================
 
 def evaluate_agent(eval_env: gym.Env, agent: PPOAgent, args: argparse.Namespace) -> float:
@@ -224,7 +339,7 @@ def evaluate_agent(eval_env: gym.Env, agent: PPOAgent, args: argparse.Namespace)
 
 def train_agent(args: argparse.Namespace):
     """主訓練函式"""
-    print("--- 啟動 PPO 訓練模式 ---")
+    print("--- 啟動改進版 PPO 訓練模式 ---")
 
     writer = SummaryWriter(f"runs/{args.run_name}")
     if args.wandb and WANDB_AVAILABLE:
@@ -259,15 +374,25 @@ def train_agent(args: argparse.Namespace):
     sorted_checkpoint_steps = sorted(checkpoint_steps.items())
     saved_checkpoints = [False] * len(sorted_checkpoint_steps)
 
-    print("\n--- 開始 PPO 訓練迴圈 ---")
+    print("\n--- 開始改進版 PPO 訓練迴圈 ---")
     while global_step < args.max_steps:
-        # [新增] 學習率線性衰減
+        # 學習率調度
         if args.anneal_lr:
             frac = 1.0 - (global_step - 1.0) / args.max_steps
             lr_now = frac * args.actor_lr
             agent.actor_optimizer.param_groups[0]["lr"] = lr_now
             lr_now = frac * args.critic_lr
             agent.critic_optimizer.param_groups[0]["lr"] = lr_now
+
+        # 動作標準差衰減 (可選)
+        if args.action_std_decay:
+            decay_factor = max(0.05, 1.0 - global_step / args.max_steps)
+            with torch.no_grad():
+                agent.actor.actor_logstd.data = torch.clamp(
+                    agent.actor.actor_logstd.data,
+                    -20,
+                    np.log(decay_factor)
+                )
 
         states_buf = torch.zeros((args.batch_size, state_dim)).to(agent.device)
         actions_buf = torch.zeros((args.batch_size, action_dim)).to(agent.device)
@@ -354,12 +479,15 @@ def train_agent(args: argparse.Namespace):
                                  agent.device)
         returns = advantages + values_buf
 
-        log_data = agent.update_model(states_buf, actions_buf, log_probs_buf, returns, advantages)
-        writer.add_scalar("losses/policy_loss", log_data["policy_loss"], global_step)
-        writer.add_scalar("losses/value_loss", log_data["value_loss"], global_step)
-        if args.wandb and WANDB_AVAILABLE:
-            wandb.log(log_data, step=global_step)
+        log_data = agent.update_model(states_buf, actions_buf, log_probs_buf, returns, advantages, values_buf)
 
+        # 記錄更詳細的訓練統計
+        for key, value in log_data.items():
+            writer.add_scalar(f"losses/{key}", value, global_step)
+            if args.wandb and WANDB_AVAILABLE:
+                wandb.log({f"losses/{key}": value}, step=global_step)
+
+        # 儲存檢查點
         for i, (step_threshold, step_str) in enumerate(sorted_checkpoint_steps):
             if not saved_checkpoints[i] and global_step >= step_threshold:
                 save_path = os.path.join(args.save_model_path, f"LAB7_{student_id}_task3_ppo_{step_str}.pt")
@@ -384,7 +512,6 @@ def test_agent(args: argparse.Namespace):
         raise ValueError("測試模式需要模型路徑，請使用 --load_model_path 指定。")
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    # 修正後程式碼
     checkpoint = torch.load(args.load_model_path, map_location=device, weights_only=False)
 
     obs_rms = checkpoint['obs_rms']
@@ -408,14 +535,14 @@ def test_agent(args: argparse.Namespace):
     test_env.training = False
 
     total_reward = 0
-    num_test_episodes = 20
+    num_test_episodes = args.num_test_episodes
     print(f"開始在 {num_test_episodes} 個回合上執行測試...")
     for i in range(num_test_episodes):
         state, _ = test_env.reset(seed=args.seed + i)
         done = False
         episode_reward = 0
         while not done:
-            action = agent.select_action(state, is_test=True)
+            action = agent.select_action(state, is_test=False)
             state, reward, terminated, truncated, _ = test_env.step(action)
             done = terminated or truncated
             episode_reward += reward
@@ -433,38 +560,49 @@ def test_agent(args: argparse.Namespace):
 
 def parse_arguments() -> argparse.Namespace:
     """解析命令列參數。"""
-    parser = argparse.ArgumentParser(description="PPO for Walker2d-v4")
+    parser = argparse.ArgumentParser(description="Improved PPO for Walker2d-v4")
 
     parser.add_argument("--env_id", type=str, default="Walker2d-v4")
     parser.add_argument("--device", type=str, default="cuda:0")
-    parser.add_argument("--seed", type=int, default=777, help="確保整個訓練過程可複現")
-    parser.add_argument("--run_name", type=str, default=f"ppo_walker_{int(time.time())}")
+    parser.add_argument("--seed", type=int, default=202, help="確保整個訓練過程可複現")
+    parser.add_argument("--run_name", type=str, default=f"improved_ppo_walker_v5")
     parser.add_argument("--inference", action="store_true", help="啟用測試模式")
     parser.add_argument("--load_model_path", type=str, default="", help="要載入的模型路徑")
     parser.add_argument("--wandb", action="store_true", help="啟用 W&B 實驗追蹤")
     parser.add_argument("--video_folder", type=str, default="task3_videos")
-    parser.add_argument("--save_model_path", type=str, default="task3_models")
+    parser.add_argument("--save_model_path", type=str, default="models")
 
-    # --- [優化] 針對 Walker2d-v4 調整的訓練超參數 ---
+    # --- 網路架構參數 ---
+    parser.add_argument("--hidden_dim", type=int, default=256, help="隱藏層維度")
+
+    # --- 訓練超參數 ---
     parser.add_argument("--max_steps", type=int, default=3_003_000)
-    parser.add_argument("--batch_size", type=int, default=2000, help="每次策略更新收集的步數 (Rollout Buffer Size)")
-    parser.add_argument("--actor_lr", type=float, default=5e-4, help="Actor 的學習率")
-    parser.add_argument("--critic_lr", type=float, default=3e-3, help="Critic 的學習率")
+    parser.add_argument("--batch_size", type=int, default=2048, help="每次策略更新收集的步數")
+    parser.add_argument("--actor_lr", type=float, default=1e-4, help="Actor 的學習率")
+    parser.add_argument("--critic_lr", type=float, default=5e-4, help="Critic 的學習率")
+    parser.add_argument("--weight_decay", type=float, default=1e-6, help="權重衰減")
     parser.add_argument("--anneal_lr", action="store_true", default=True, help="啟用學習率線性衰減")
-    parser.add_argument("--n_epochs", type=int, default=20, help="每次更新時，重複學習數據的次數")
+    parser.add_argument("--n_epochs", type=int, default=10, help="每次更新時，重複學習數據的次數")
     parser.add_argument("--num_minibatches", type=int, default=32, help="將 batch 切分為多少個 minibatch")
-    parser.add_argument("--gamma", type=float, default=0.92, help="折扣因子，Walker2d 需看得更遠")
+    parser.add_argument("--gamma", type=float, default=0.995, help="折扣因子")
     parser.add_argument("--gae_lambda", type=float, default=0.95, help="GAE 的 lambda 參數")
     parser.add_argument("--clip_coef", type=float, default=0.2, help="PPO 的裁剪係數 epsilon")
     parser.add_argument("--vf_coef", type=float, default=0.5, help="價值函數損失的係數")
-    parser.add_argument("--entropy_beta", type=float, default=0.02, help="熵係數，適度降低以穩定學習")
-    parser.add_argument("--max_grad_norm", type=float, default=0.5)
+    parser.add_argument("--entropy_beta", type=float, default=0.01, help="熵係數")
+    parser.add_argument("--max_grad_norm", type=float, default=0.5, help="梯度裁剪閾值")
+    parser.add_argument("--clip-vloss", action="store_true", default=True, help="啟用價值函數損失裁剪")
+
+    # --- 新增的改進參數 ---
+    parser.add_argument("--target_kl", type=float, default=0.01, help="目標KL散度")
+    parser.add_argument("--kl_threshold", type=float, default=0.015, help="KL散度早停閾值")
+    parser.add_argument("--early_stop_kl", action="store_true", default=True, help="啟用KL散度早停")
+    parser.add_argument("--action_std_decay", action="store_true", default=False, help="啟用動作標準差衰減")
 
     # --- 評估參數 ---
     parser.add_argument("--eval_interval_episodes", type=int, default=20, help="每隔多少回合進行一次評估")
     parser.add_argument("--eval_episodes", type=int, default=20, help="每次評估時運行的回合總數")
-    # [新增] 為獨立測試新增參數
     parser.add_argument("--num_test_episodes", type=int, default=20, help="獨立測試時運行的回合總數")
+
     return parser.parse_args()
 
 

@@ -121,6 +121,8 @@ class Runner:
             with torch.no_grad():
                 state_tensor = to_tensor(self.state, device).unsqueeze(0)
                 policy_dist = self.actor(state_tensor)
+                
+                # 從分佈中「採樣」一個動作
                 action = policy_dist.sample()
                 log_prob = policy_dist.log_prob(action).sum(dim=-1)
                 value = self.critic(state_tensor)
@@ -223,14 +225,22 @@ class PPOLearner:
                 policy_dist = self.actor(mb_states)
                 new_log_probs = policy_dist.log_prob(mb_actions).sum(dim=-1)
                 entropy = policy_dist.entropy().mean()
-
+                
+                # 計算機率比Ratio
                 log_ratio = new_log_probs - mb_log_probs_old
                 ratio = torch.exp(log_ratio)
-
+                
+                # 目標一 無裁切
                 surr1 = mb_advantages * ratio
+                
+                # 目標二 有裁切
                 surr2 = mb_advantages * torch.clamp(ratio, 1 - self.config.clip_coef, 1 + self.config.clip_coef)
+                
+                # 取最小值作為Loss
                 pg_loss = -torch.min(surr1, surr2).mean()
 
+                # 將熵作為獎勵加入最終的 Actor 損失函數
+                # 乘以 config.entropy_beta 來控制強度
                 actor_loss = pg_loss - self.config.entropy_beta * entropy
 
                 self.actor_optimizer.zero_grad()
@@ -262,7 +272,8 @@ def compute_gae_and_returns(memory: dict, config: argparse.Namespace):
     num_steps = len(rewards)
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_gae_lam = 0
-
+    
+    # 1.從 rollout 的最後一步開始，倒序遍歷
     for t in reversed(range(num_steps)):
         if t == num_steps - 1:
             next_non_terminal = 1.0 - last_done
@@ -270,8 +281,12 @@ def compute_gae_and_returns(memory: dict, config: argparse.Namespace):
         else:
             next_non_terminal = 1.0 - dones[t + 1]
             next_value = values[t + 1]
-
+        # 2. 計算 TD 誤差 delta
+        # 公式: δ_t = r_t + γ * V(s_{t+1}) - V(s_t)
         delta = rewards[t] + config.gamma * next_value * next_non_terminal - values[t]
+        
+        # 3. 使用遞迴公式計算 GAE
+        # 公式: A_t = δ_t + γ * λ * A_{t+1}
         advantages[t] = last_gae_lam = delta + config.gamma * config.gae_lambda * next_non_terminal * last_gae_lam
 
     memory['advantages'] = advantages
