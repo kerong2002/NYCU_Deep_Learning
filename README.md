@@ -1,4 +1,4 @@
-# NYCU DLP 2025 Summer
+# NYCU DLP Summer 2025 
 #### Lab1 Backpropagation
 #### Lab2 Binary Semantic Segmentation
 #### Lab3 MaskGIT for Image Inpainting
